@@ -1,0 +1,19 @@
+fastmcp
+mcp[cli]
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+requests
+httpx
+python-dotenv
+pydantic
+aiohttp
+uvicorn
+fastapi
+# Slack SDK & Bolt
+slack-sdk
+slack-bolt
+
+# Flask for handling Slack interactions
+Flask

@@ -17,6 +17,8 @@ import os.path
 import base64
 import json
 import logging
+import mimetypes
+from email.message import EmailMessage
 from typing import List, Optional, Dict
 
 from mcp.server.fastmcp import FastMCP
@@ -27,10 +29,14 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+
+
 # ---------------------------
 # Config / Constants
 # ---------------------------
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+SCOPES = ["https://www.googleapis.com/auth/gmail.readonly",
+          "https://www.googleapis.com/auth/gmail.send",
+          "https://www.googleapis.com/auth/gmail.compose"]
 ATTACHMENTS_DIR = "attachments"
 TOKEN_PATH = "token.json"
 CREDENTIALS_PATH = "credentials.json"
@@ -371,6 +377,73 @@ def toggle_category_visibility(service, category: str, action: str = "hide", app
         return {"category": cat, "action": action, "modified_messages": modified, "method": "patch_label_visibility"}
 
 
+
+def _build_mime_message(to_email: str, subject: str, body: str, attachment_paths: Optional[List[str]] = None) -> EmailMessage:
+    """Builds an EmailMessage object with optional attachments."""
+    mime_message = EmailMessage()
+    mime_message["To"] = to_email
+    mime_message["From"] = "me"
+    mime_message["Subject"] = subject
+    mime_message.set_content(body)
+
+    if attachment_paths:
+        for path in attachment_paths:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Attachment not found: {path}")
+            ctype, encoding = mimetypes.guess_type(path)
+            if ctype is None:
+                maintype, subtype = "application", "octet-stream"
+            else:
+                maintype, subtype = ctype.split("/", 1)
+            with open(path, "rb") as f:
+                mime_message.add_attachment(
+                    f.read(),
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=os.path.basename(path)
+                )
+    return mime_message
+
+
+
+def _create_draft(service, to_email: str, subject: str, body: str, attachment_paths: Optional[List[str]] = None) -> Dict:
+    """Create a Gmail draft with optional attachments."""
+    try:
+        mime_message = _build_mime_message(to_email, subject, body, attachment_paths)
+        encoded_message = base64.urlsafe_b64encode(mime_message.as_bytes()).decode()
+        draft = service.users().drafts().create(userId="me", body={"message": {"raw": encoded_message}}).execute()
+        attachments = [os.path.basename(p) for p in attachment_paths] if attachment_paths else []
+        preview = {"to": to_email, "subject": subject, "body": body, "attachments": attachments}
+        return {"status": "ok", "draft_id": draft.get("id"), "preview": preview}
+    except FileNotFoundError as fnf:
+        return {"status": "error", "message": str(fnf)}
+    except HttpError as e:
+        return {"status": "error", "message": str(e)}
+
+
+def _send_draft(service, draft_id: str) -> Dict:
+    """Send a Gmail draft by draft_id."""
+    try:
+        sent_msg = service.users().drafts().send(userId="me", body={"id": draft_id}).execute()
+        return {"status": "ok", "message_id": sent_msg.get("id")}
+    except HttpError as e:
+        return {"status": "error", "message": str(e)}
+    
+    
+def delete_draft_helper(draft_id: str) -> bool:
+    """
+    Deletes a Gmail draft by draft_id.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        service = build_service()
+        service.users().drafts().delete(userId="me", id=draft_id).execute()
+        return True
+    except Exception as e:
+        logging.error(f"Failed to delete draft {draft_id}: {e}")
+        return False
+
+
 # ---------------------------
 # MCP Tools (exposed over MCP)
 # ---------------------------
@@ -459,6 +532,60 @@ def read_mail(sender_email: str) -> Dict:
     if not result:
         return {"status": "empty", "message": f"No emails found from {sender_email}"}
     return {"status": "ok", "subject": result["subject"], "body_snippet": (result["body"][:1024] + "...") if len(result["body"])>1024 else result["body"], "attachments": result["attachments"]}
+
+
+@mcp.tool()
+def create_draft_email(to_email: str, subject: str, body: str, attachment_paths: Optional[List[str]] = None) -> Dict:
+    """Create a draft email (MCP tool) and return a preview."""
+    service = build_service()
+    return _create_draft(service, to_email, subject, body, attachment_paths)
+
+
+@mcp.tool()
+def send_draft(draft_id: str) -> Dict:
+    """Send a Gmail draft by draft_id (MCP tool)."""
+    service = build_service()
+    return _send_draft(service, draft_id)
+
+
+@mcp.tool()
+def delete_draft(draft_id: str) -> Dict:
+    """
+    MCP tool to delete an existing draft.
+    """
+    success = delete_draft_helper(draft_id)
+    if success:
+        return {"status": "ok", "message": f"Draft {draft_id} deleted successfully."}
+    else:
+        return {"status": "error", "message": f"Failed to delete draft {draft_id}."}
+
+
+# ---------------------------
+# MCP Prompts
+# ---------------------------
+
+@mcp.prompt()
+def draft_confirmation_prompt() -> str:
+    """
+    Guide the LLM on how to display draft and handle user actions.
+    - Show To, Subject, Body, Attachments.
+    - Ask user: 'Do you want to send this draft? (Yes/No/Edit)'
+    - If user says 'Yes' → call 'send_draft' with draft_id
+    - If user says 'Edit' → call 'delete_draft' with draft_id, then prompt user for new content
+    - Never send automatically
+    """
+    return (
+        "You have just created a draft email. Display it clearly:\n"
+        "- To: {to_email}\n"
+        "- Subject: {subject}\n"
+        "- Body: {body}\n"
+        "- Attachments: {attachments}\n\n"
+        "Ask the user: 'Do you want to send this draft? (Yes/No/Edit)'.\n"
+        "If the user says 'Yes', call the MCP tool 'send_draft' with draft_id.\n"
+        "If the user says 'Edit', call the MCP tool 'delete_draft' with draft_id, "
+        "then collect new draft content from the user.\n"
+        "Do NOT send automatically under any circumstances."
+    )
 
 
 # ---------------------------

@@ -175,4 +175,4 @@ def main():
 
 if __name__ == "__main__":
     # main()
-    read_mail("marketing@mailer.murf.ai")
+    read_mail("message@adobe.com")
