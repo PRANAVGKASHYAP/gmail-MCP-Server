@@ -8,14 +8,20 @@ import os
 from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core import Settings
 
-# set your Google API key (from Google AI Studio)
-os.environ["GOOGLE_API_KEY"] = ""
+from dotenv import load_dotenv
+# --- Load environment variables ---
+load_dotenv()  # Loads variables from .env file
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+if not GOOGLE_API_KEY:
+    raise ValueError("❌ GOOGLE_API_KEY not found in environment. Please add it to your .env file.")
+
 from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core import Settings
 
 llm = GoogleGenAI(
     model="gemini-2.5-pro",   # or "gemini-2.5-pro"
-    api_key=os.environ["GOOGLE_API_KEY"],
+    api_key= GOOGLE_API_KEY,
     temperature=0.2,
     max_output_tokens=2048
 )
