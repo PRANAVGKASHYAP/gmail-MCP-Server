@@ -5,3 +5,8 @@ attachments/
 venv/
 __pycache__/
 claud_api.txt
+chroma_db/
+faiss_index/
+token2.json
+.env
+
