@@ -62,10 +62,6 @@ def read_mail(sender_email : str):
         if parts:
             for part in parts:
 
-                # check for the plain text in mails 
-                if part["mimeType"] == "text/plain":
-                    data = part["body"]["data"]
-                    break
 
                 # check for the attachments --> if any attachmnts are there dowload it 
                 if part.get("filename"):
@@ -84,6 +80,12 @@ def read_mail(sender_email : str):
                     with open(filename, "wb") as f:
                         f.write(file_data)
                         print(f"Attachment {filename} downloaded successfully.")
+                
+                
+                # check for the plain text in mails 
+                if part["mimeType"] == "text/plain":
+                    data = part["body"]["data"]
+                    break
 
                         
         else:
@@ -173,4 +175,4 @@ def main():
 
 if __name__ == "__main__":
     # main()
-    read_mail("pesuplacements@pes.edu")
+    read_mail("marketing@mailer.murf.ai")

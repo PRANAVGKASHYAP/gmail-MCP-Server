@@ -5,3 +5,4 @@ attachments/
 venv/
 __pycache__/
 claud_api.txt
+.env
