@@ -20,7 +20,7 @@ from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core import Settings
 
 llm = GoogleGenAI(
-    model="gemini-2.5-pro",   # or "gemini-2.5-pro"
+    model="gemini-2.5-flash",   # or "gemini-2.5-pro"
     api_key= GOOGLE_API_KEY,
     temperature=0.2,
     max_output_tokens=2048

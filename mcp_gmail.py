@@ -285,6 +285,62 @@ def get_latest_message_from_sender(service, sender_email: str, category: Optiona
         logging.exception("Error retrieving message: %s", e)
         raise
 
+def get_messages_by_label(service, label_name: str, max_results: int = 50) -> List[Dict]:
+    """
+    Fetch up to `max_results` latest emails filtered purely by label or category.
+    Returns simplified message summaries (id, subject, snippet).
+    """
+    # Try to match a system label (CATEGORY_PROMOTIONS, etc.)
+    label_id = None
+    label_name_l = label_name.lower()
+
+    # Determine label ID
+    if label_name_l in SYSTEM_CATEGORY_LABELS:
+        label_id = SYSTEM_CATEGORY_LABELS[label_name_l]
+    else:
+        # Search for user-created labels
+        labels = list_labels(service)
+        for lbl in labels:
+            if lbl.get("name", "").lower() == label_name_l:
+                label_id = lbl["id"]
+                break
+        if not label_id:
+            raise ValueError(f"Label '{label_name}' not found. Check spelling or create it first.")
+
+    # Fetch messages by label
+    try:
+        resp = service.users().messages().list(
+            userId="me",
+            labelIds=[label_id],
+            maxResults=max_results
+        ).execute()
+        messages = resp.get("messages", [])
+        results = []
+
+        for msg in messages:
+            msg_id = msg["id"]
+            full = service.users().messages().get(
+                userId="me",
+                id=msg_id,
+                format="metadata",
+                metadataHeaders=["Subject", "From", "Date"]
+            ).execute()
+
+            headers = {h["name"].lower(): h["value"] for h in full.get("payload", {}).get("headers", [])}
+            results.append({
+                "id": msg_id,
+                "subject": headers.get("subject", "(no subject)"),
+                "from": headers.get("from", ""),
+                "date": headers.get("date", ""),
+                "snippet": full.get("snippet", "")
+            })
+
+        return results
+    except HttpError as e:
+        logging.exception("Failed to fetch messages by label '%s': %s", label_name, e)
+        raise
+
+
 
 # ---------------------------
 # Visibility / Show-Hide approaches
@@ -369,6 +425,97 @@ def toggle_category_visibility(service, category: str, action: str = "hide", app
                 except Exception:
                     continue
         return {"category": cat, "action": action, "modified_messages": modified, "method": "patch_label_visibility"}
+
+from difflib import get_close_matches
+from rapidfuzz import fuzz, process
+
+async def unified_message_search(
+    service,
+    category: Optional[str] = None,  # label name, system label ID, or user label ID
+    sender: Optional[str] = None,
+    keywords: Optional[str] = None,
+    match_mode: str = "exact",
+    max_results: int = 50,
+) -> List[Dict]:
+    """
+    Intelligent Unified Search API:
+    - Supports sender, category (label/system/user), and keywords.
+    - match_mode: exact | fuzzy | regex
+    """
+    match_mode = match_mode.lower().strip()
+
+    search_terms = []
+
+    # If category is provided, determine if it's system label ID or user label name
+    if category:
+        # If it looks like a system label (CATEGORY_*, SPAM, TRASH, etc.), use labelIds
+        if category.startswith("CATEGORY_") or category.upper() in ("SPAM", "TRASH", "IMPORTANT", "INBOX"):
+            search_terms.append(f"label:{category}")
+        else:
+            # Otherwise, treat as user-created label name
+            search_terms.append(f"label:{category}")
+
+    if sender:
+        search_terms.append(f"from:{sender}")
+
+    if keywords:
+        search_terms.append(f'"{keywords}"')
+
+    if not search_terms:
+        raise ValueError("At least one of category, sender, or keywords must be provided.")
+
+    gmail_query = " OR ".join(search_terms)
+    logging.info(f"[UnifiedSearch] Executing query: {gmail_query}")
+
+    try:
+        resp = await asyncio.to_thread(
+            service.users().messages().list,
+            **{"userId": "me", "q": gmail_query, "maxResults": max_results}
+        )
+        resp = resp.execute()
+        msgs = resp.get("messages", [])
+        results = []
+
+        for msg in msgs:
+            msg_id = msg["id"]
+            full = service.users().messages().get(
+                userId="me", id=msg_id, format="full"
+            ).execute()
+            payload = full.get("payload", {})
+            text = _get_text_from_payload(payload)
+            headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
+            subject = headers.get("subject", "(no subject)")
+            sender_field = headers.get("from", "")
+            date_field = headers.get("date", "")
+            snippet = full.get("snippet", "")
+
+            # Fuzzy / regex filtering (post-Gmail filter)
+            match_score = 100
+            if keywords and match_mode != "exact":
+                if match_mode == "fuzzy":
+                    match_score = fuzz.partial_ratio(keywords.lower(), text.lower())
+                    if match_score < 60:
+                        continue
+                elif match_mode == "regex":
+                    import re
+                    if not re.search(keywords, text, re.IGNORECASE):
+                        continue
+
+            results.append({
+                "id": msg_id,
+                "subject": subject,
+                "from": sender_field,
+                "date": date_field,
+                "snippet": snippet,
+                "match_score": match_score,
+            })
+
+        # Sort by match_score descending
+        return sorted(results, key=lambda x: x["match_score"], reverse=True)[:max_results]
+
+    except HttpError as e:
+        logging.exception("Unified search failed: %s", e)
+        raise
 
 
 # ---------------------------
@@ -459,6 +606,101 @@ def read_mail(sender_email: str) -> Dict:
     if not result:
         return {"status": "empty", "message": f"No emails found from {sender_email}"}
     return {"status": "ok", "subject": result["subject"], "body_snippet": (result["body"][:1024] + "...") if len(result["body"])>1024 else result["body"], "attachments": result["attachments"]}
+
+@mcp.tool()
+def fetch_mails_by_label(label_name: str, limit: int = 50) -> Dict:
+    """
+    Fetch a specified number of latest mails under a given Gmail label or category.
+    - label_name: 'promotions', 'social', 'updates', 'forums', or any custom user label.
+    - limit: number of emails to retrieve (default 5).
+    """
+    service = build_service()
+    mails = get_messages_by_label(service, label_name, limit)
+    if not mails:
+        return {"status": "empty", "message": f"No mails found for label '{label_name}'"}
+    return {"status": "ok", "count": len(mails), "label": label_name, "mails": mails}
+@mcp.tool()
+def batch_retreival_mail(
+    category: Optional[str] = None,
+    sender: Optional[str] = None,
+    keywords: Optional[str] = None,
+    match_mode: str = "exact",
+    limit: int = 5
+) -> dict:
+    """
+    Unified Gmail batch retrieval tool:
+    - Accepts arguments directly like other MCP tools
+    - Dynamically fetches Gmail labels (system + user-created)
+    - match_mode: exact | fuzzy | regex
+    """
+    service = build_service()
+
+    # Strip and normalize inputs
+    category = category.strip() if category else None
+    sender = sender.strip() if sender else None
+    keywords = keywords.strip() if keywords else None
+    match_mode = match_mode.lower().strip() if match_mode else "exact"
+
+    if not any([category, sender, keywords]):
+        return {"status": "error", "message": "At least one of category, sender, or keywords must be provided."}
+
+    # Fetch labels dynamically
+    try:
+        label_results = service.users().labels().list(userId="me").execute()
+        labels = label_results.get("labels", [])
+        label_lookup = {lbl["name"].lower(): lbl["id"] for lbl in labels}
+    except Exception as e:
+        return {"status": "error", "message": f"Label fetch failed: {str(e)}"}
+
+    # Gmail system labels
+    system_labels = {
+        "primary": "CATEGORY_PRIMARY",
+        "social": "CATEGORY_SOCIAL",
+        "promotions": "CATEGORY_PROMOTIONS",
+        "updates": "CATEGORY_UPDATES",
+        "forums": "CATEGORY_FORUMS",
+        "spam": "SPAM",
+        "trash": "TRASH",
+        "important": "IMPORTANT"
+    }
+
+    # Map category to label ID if provided
+    label_id = None
+    if category:
+        key = category.lower()
+        label_id = label_lookup.get(key) or system_labels.get(key) or category
+
+    async def _runner():
+        return await unified_message_search(
+            service,
+            category=label_id,
+            sender=sender,
+            keywords=keywords,
+            match_mode=match_mode,
+            max_results=limit
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import nest_asyncio
+        nest_asyncio.apply()
+        results = loop.run_until_complete(_runner())
+    else:
+        results = asyncio.run(_runner())
+
+    if not results:
+        return {"status": "empty", "message": "No matches found."}
+
+    return {
+        "status": "ok",
+        "count": len(results),
+        "results": results[:limit],
+        "matched_label": label_id
+    }
 
 
 # ---------------------------
