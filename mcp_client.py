@@ -1,8 +1,9 @@
 import nest_asyncio
 nest_asyncio.apply()
 import asyncio
-import loading_dotenv
-loading_dotenv.load_dotenv()
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from llama_index.llms.ollama import Ollama
 from llama_index.core import Settings
